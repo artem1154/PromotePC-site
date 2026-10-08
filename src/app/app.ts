@@ -1,5 +1,4 @@
 import { Component, OnDestroy, signal } from '@angular/core';
-import JSZip from 'jszip';
 import * as QRCode from 'qrcode';
 
 interface AgentPackage {
@@ -20,9 +19,8 @@ export class App implements OnDestroy {
   readonly error = signal('');
   readonly result = signal<AgentPackage | null>(null);
 
-  private readonly archivePath = 'agent/agent.zip';
-  private readonly configPath = 'config.json';
-  private readonly idField = 'groupId';
+  private readonly downloadUrl =
+    'https://vqgbf86r-5034.euw.devtunnels.ms/api/download-agent';
 
   private request?: AbortController;
 
@@ -36,87 +34,55 @@ export class App implements OnDestroy {
     this.request = request;
 
     try {
-      if (typeof globalThis.crypto?.randomUUID !== 'function') {
-        throw new Error(
-          'Для створення ID відкрийте сайт через HTTPS або localhost.'
-        );
-      }
-
-      const response = await fetch(
-        new URL(this.archivePath, document.baseURI),
-        {
-          signal: request.signal,
-          cache: 'no-cache'
-        }
-      );
+      // Отримуємо готовий архів від бекенду.
+      const response = await fetch(this.downloadUrl, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/zip'
+        },
+        signal: request.signal,
+        cache: 'no-store'
+      });
 
       if (!response.ok) {
         throw new Error(
-          'Файл агента поки недоступний. Спробуйте пізніше.'
+          `Не вдалося завантажити агента (HTTP ${response.status}). Спробуйте пізніше.`
         );
       }
 
-      let zip: JSZip;
+      const contentType = response.headers
+        .get('Content-Type')
+        ?.split(';')[0]
+        .trim()
+        .toLowerCase();
 
-      try {
-        zip = await JSZip.loadAsync(await response.arrayBuffer());
-      } catch {
+      if (contentType !== 'application/zip') {
         throw new Error(
-          'Не вдалося прочитати пакет агента. Зверніться до команди проєкту.'
+          'Сервер повернув не ZIP-архів. Спробуйте пізніше.'
         );
       }
 
-      const configFile = zip.file(this.configPath);
+      // ID беремо з тієї самої відповіді, що й архів.
+      const id = response.headers.get('X-Agent-Id')?.trim();
 
-      if (!configFile) {
+      if (!id) {
         throw new Error(
-          'У пакеті агента відсутній файл налаштувань.'
+          'Не вдалося отримати ID агента від сервера.'
         );
       }
 
-      let config: unknown;
+      const blob = await response.blob();
 
-      try {
-        const text = await configFile.async('string');
-        config = JSON.parse(text.replace(/^\uFEFF/, ''));
-      } catch {
-        throw new Error(
-          'Файл налаштувань агента має некоректний формат.'
-        );
+      if (blob.size === 0) {
+        throw new Error('Сервер повернув порожній файл агента.');
       }
 
-      if (
-        typeof config !== 'object' ||
-        config === null ||
-        Array.isArray(config)
-      ) {
-        throw new Error(
-          'Налаштування агента повинні бути JSON-об’єктом.'
-        );
-      }
-
-      // Один ID використовується в конфігурації та QR-коді.
-      const id = crypto.randomUUID();
-
-      zip.file(
-        this.configPath,
-        JSON.stringify(
-          {
-            ...config,
-            [this.idField]: id
-          },
-          null,
-          2
-        )
-      );
-
+      // QR містить саме ID, отриманий від бекенду.
       const qr = await QRCode.toDataURL(id, {
         width: 240,
         margin: 4,
         errorCorrectionLevel: 'M'
       });
-
-      const blob = await zip.generateAsync({ type: 'blob' });
 
       if (request.signal.aborted) return;
 
@@ -126,7 +92,7 @@ export class App implements OnDestroy {
         id,
         qr,
         url: URL.createObjectURL(blob),
-        filename: `RemotePC-${id}.zip`
+        filename: 'RemoteMonitorAgent.zip'
       };
 
       this.result.set(ready);
@@ -135,6 +101,7 @@ export class App implements OnDestroy {
         URL.revokeObjectURL(previous.url);
       }
 
+      // Запускаємо завантаження отриманого архіву.
       const link = document.createElement('a');
       link.href = ready.url;
       link.download = ready.filename;
@@ -146,7 +113,7 @@ export class App implements OnDestroy {
       if (!request.signal.aborted) {
         this.error.set(
           error instanceof TypeError
-            ? 'Не вдалося отримати файл. Перевірте з’єднання та спробуйте ще раз.'
+            ? 'Не вдалося з’єднатися із сервером. Перевірте з’єднання та спробуйте ще раз.'
             : error instanceof Error
               ? error.message
               : 'Не вдалося підготувати агента.'
